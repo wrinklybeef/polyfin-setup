@@ -9,8 +9,8 @@ Keep the Proxmox host on its existing management network and place only the medi
 | Trusted LAN / Proxmox management | `192.168.10.0/24` |
 | Media VLAN | `50` |
 | Media subnet / gateway | `192.168.50.0/24` / `192.168.50.1` |
-| DHCP pool | `192.168.50.100–192.168.50.199` |
-| Reserved media VM | `192.168.50.100` |
+| DHCP pool | `192.168.50.100-192.168.50.199` |
+| Reserved media VM | `192.168.50.10` |
 | Public WAN address | `203.0.113.10` |
 | Allowed remote household | `198.51.100.25/32` |
 | Public hostname | `tv.example.com` |
@@ -19,21 +19,21 @@ These are example values, not a real network inventory. Public IP examples use d
 
 ## 1. FortiGate VLAN and DHCP
 
-Under **Network → Interfaces**, create a VLAN interface named `media` on the interface connected to the switch trunk:
+Under **Network > Interfaces**, create a VLAN interface named `media` on the interface connected to the switch trunk:
 
 - VLAN ID: `50`
 - IP/netmask: `192.168.50.1/24`
 - Role: `LAN`
 - Administrative access: none
-- DHCP: enabled, range `192.168.50.100–192.168.50.199`
+- DHCP: enabled, range `192.168.50.100-192.168.50.199`
 - Gateway: interface address
-- DNS: system DNS, or your chosen reachable resolver
+- DNS: specify `1.1.1.1` and `1.0.0.1`
 
-The LAN role exposes DHCP options in the GUI; firewall policies provide isolation regardless of the role label. Reserve `192.168.50.100` for the VM's MAC address. A DNS resolver on another internal VLAN needs its own narrow access policy for TCP/UDP 53.
+The LAN role exposes DHCP options in the GUI; firewall policies provide isolation regardless of the role label. Reserve `192.168.50.10` for the VM's MAC address, outside the dynamic pool but within the media subnet. A DNS resolver on another internal VLAN needs its own narrow access policy for TCP/UDP 53.
 
 ## 2. Cisco switch
 
-Create VLAN 50. On an SG300, use **VLAN Management → Port to VLAN** to set these memberships:
+Create VLAN 50. On an SG300, use **VLAN Management > Port to VLAN** to set these memberships:
 
 | Port role | Existing management/native VLAN | Media VLAN 50 |
 | --- | --- | --- |
@@ -45,10 +45,10 @@ Use trunk/general mode as appropriate for the existing switch configuration. Do 
 
 ## 3. Proxmox and Ubuntu
 
-1. Open the Proxmox node's **System → Network → vmbr0**.
+1. Open the Proxmox node's **System > Network > vmbr0**.
 2. Enable **VLAN aware** and ensure the permitted VLAN IDs include 50.
 3. Preserve the bridge's management IP, gateway, and physical uplink. Apply with console access available.
-4. Open the VM's **Hardware → Network Device**. Keep `vmbr0`, the VirtIO model, and the existing MAC address; set **VLAN Tag** to `50`.
+4. Open the VM's **Hardware > Network Device**. Keep `vmbr0`, the VirtIO model, and the existing MAC address; set **VLAN Tag** to `50`.
 5. In the VM console, check `ip -4 addr show` and `ip route`. Renew DHCP or reboot the VM if it retains its old lease.
 
 Ubuntu receives an ordinary untagged interface, commonly `ens18`; Proxmox applies the VLAN tag. Do not add another VLAN tag inside the guest. Check any enabled Proxmox firewall rules as well as FortiGate policies.
@@ -59,18 +59,18 @@ Create address objects for the media subnet, the VM as a `/32`, the trusted LAN,
 
 | Traffic | Source | Destination | Service | Source NAT |
 | --- | --- | --- | --- | --- |
-| Media → WAN | Media subnet | Internet | ALL, supporting source-dependent peer ports | Enabled, outgoing interface address |
-| LAN → Media | Trusted LAN | Media VM `/32` | TCP 8096; optionally 8443 for local HTTPS | Disabled |
-| Admin → Media | Admin workstation `/32` | Media VM `/32` | TCP 22 | Disabled |
-| Media → Other internal networks | Media subnet | Internal networks | Deny except explicit requirements | Disabled |
+| Media > WAN | Media subnet | Internet | ALL, supporting source-dependent peer ports | Enabled, outgoing interface address |
+| LAN > Media | Trusted LAN | Media VM `/32` | TCP 8096 and 8443 | Disabled |
+| Admin > Media | Admin workstation `/32` | Media VM `/32` | TCP 22 | Disabled |
+| Media > Other internal networks | Media subnet | Internal networks | Deny except explicit requirements | Disabled |
 
 Enable logging and place specific permits above applicable deny rules. Do not add a broad media-to-LAN allow policy. Established connections have return traffic handled by the stateful firewall; they do not require reverse allow policies.
 
-Test SSH and `http://192.168.50.100:8096` from an allowed LAN device. Test internet access from the VM with `curl -I --max-time 10 https://www.cloudflare.com`.
+Test SSH and `http://192.168.50.10:8096` from an allowed LAN device. Test internet access from the VM with `curl -I --max-time 10 https://www.cloudflare.com`.
 
 ## External access
 
-Cloudflare's DNS-only A record points `tv.example.com` at `203.0.113.10`. Caddy obtains its certificate through DNS validation as described in the [README](../README.md#5-configure-cloudflare-and-https).
+Cloudflare's DNS-only A record points `tv.example.com` at `203.0.113.10`. Caddy obtains its certificate through DNS validation as described in the [README](../README.md#12-configure-cloudflare-dns-and-the-api-token).
 
 Create a **port-forwarding VIP** on the internet-facing interface:
 
@@ -78,7 +78,7 @@ Create a **port-forwarding VIP** on the internet-facing interface:
 | --- | --- |
 | Name | `Polyfin-HTTPS-VIP` |
 | External IP | `203.0.113.10` |
-| Mapped IP | `192.168.50.100` |
+| Mapped IP | `192.168.50.10` |
 | Protocol | TCP |
 | External port | 8443 |
 | Mapped port | 8443 |

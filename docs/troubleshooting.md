@@ -41,7 +41,7 @@ If discovery still fails, check the selected torrent route, user torrent permiss
 
 ## Missing streaming sources
 
-Cinemeta supplies catalogs and metadata, not playable video. Add a Stremio-compatible streaming provider under **Content → Sources** and confirm it returns streams for the selected title.
+Cinemeta supplies catalogs and metadata, not playable video. Add a Stremio-compatible streaming provider under **Content > Sources** and confirm it returns streams for the selected title.
 
 For torrent sources, enable both the server's torrent engine and the user's **Can play torrent streams** permission. An add-on's source count is not the number of peers currently connected to the server.
 
@@ -70,7 +70,7 @@ First test Polyfin locally, then Caddy with the correct hostname and certificate
 
 ```bash
 curl -I http://127.0.0.1:8096/web/
-curl -I --resolve tv.example.com:8443:192.168.50.100 \
+curl -I --resolve tv.example.com:8443:192.168.50.10 \
   https://tv.example.com:8443/web/
 sudo docker compose --env-file .env -f docker/caddy/compose.yaml logs --tail=50 caddy
 ```
@@ -100,4 +100,4 @@ sudo docker compose --env-file .env -f docker/caddy/compose.yaml exec caddy \
 
 If hardware-encoder probes report a missing GPU library but Polyfin selects software transcoding, use a directly playable source or allow enough CPU for conversion. GPU passthrough is not required for this setup.
 
-Check free disk space when large sources stall; temporary streaming caches still consume storage. For missing descriptions, refresh the title's metadata and inspect source errors in **System → Health**. A TMDB key enriches cast and artwork, but does not turn a metadata catalog into a streaming source.
+Check free disk space when large sources stall; temporary streaming caches still consume storage. For missing descriptions, refresh the title's metadata and inspect source errors in **System > Health**. A TMDB key enriches cast and artwork, but does not turn a metadata catalog into a streaming source.
