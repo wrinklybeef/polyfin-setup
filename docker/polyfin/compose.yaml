@@ -8,6 +8,12 @@ services:
     restart: unless-stopped
     # Use Docker's built-in bridge, avoiding its embedded 127.0.0.11 DNS.
     network_mode: bridge
+    # Optional Intel/AMD VAAPI: enable after GPU setup in README step 11a.
+    # Uncomment devices, then group_add after setting POLYFIN_RENDER_GID in .env.
+    # devices:
+    #   - /dev/dri:/dev/dri
+    # group_add:
+    #   - "${POLYFIN_RENDER_GID:?Set POLYFIN_RENDER_GID to the render device GID in .env}"
     environment:
       POLYFIN_DATABASE: embedded
       POLYFIN_SECRET_KEY: ${POLYFIN_SECRET_KEY:?Set POLYFIN_SECRET_KEY in .env}

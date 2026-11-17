@@ -369,6 +369,270 @@ Posters with no playable versions indicate a source or permission problem. Sourc
 
 Set a cache limit that leaves space for the operating system and database. For richer cast information and artwork, configure your own TMDB API key in **Settings > Content > Images**. Web-player themes affect the browser interface; native TV clients control their own layouts.
 
+## 11a. Optional: Intel Quick Sync hardware transcoding with Proxmox GPU passthrough
+
+After installing Polyfin and testing playback, use this walkthrough to give an Ubuntu VM direct access to an Intel integrated GPU. Intel Quick Sync is the hardware video engine; this setup uses it through **VAAPI**, so select **AMD or Intel (VAAPI)** in Polyfin rather than a separate QSV encoder option. GPU acceleration is optional, and Proxmox passthrough is only needed for this VM deployment. A physical Docker host with a usable GPU can begin with the device checks in step 5 below.
+
+### Working hardware and environment
+
+This deployment was successfully configured with:
+
+| Component | Working example |
+| --- | --- |
+| Host | Dell OptiPlex with Intel Core i5-9600T |
+| GPU | Intel UHD Graphics 630, PCI ID `8086:3e92` |
+| Proxmox GPU address / IOMMU group | `0000:00:02.0` / group `0` |
+| Hypervisor / guest | Proxmox VE / Ubuntu Server 24.04 |
+| VM ID | `102` |
+| VM firmware / machine | Legacy BIOS (SeaBIOS) / existing default i440fx |
+| VM CPU / memory | Host passthrough, 2 cores / 4096 MiB |
+| Polyfin | Docker Compose with embedded PostgreSQL |
+| Acceleration / guest render device | Intel VAAPI / `/dev/dri/renderD128` |
+
+The VM worked **without converting to OVMF/UEFI, changing its machine type, enabling `x-vga`, or disabling its virtual display**. Keep the existing working firmware and machine settings for this example. Other hardware may need different passthrough preparation; these results describe this host, not a universal GPU compatibility guarantee.
+
+### 1. Verify Intel VT-d / IOMMU on the Proxmox host
+
+Open the **Proxmox host shell**, not the Ubuntu VM shell. IOMMU (Intel VT-d) provides the device isolation needed to assign a PCI device directly to a VM. Check that it is active and find the GPU:
+
+```bash
+dmesg | grep -Ei 'DMAR|IOMMU' | tail -20
+lspci -nn | grep -Ei 'VGA|Display'
+```
+
+This host reported Intel VT-d enabled and detected:
+
+```text
+00:02.0 Intel CoffeeLake-S GT2 [UHD Graphics 630] [8086:3e92]
+```
+
+Use your own GPU's full PCI address in the following commands. Set these variables in the Proxmox shell and keep that shell open through step 4:
+
+```bash
+read -r -p "GPU PCI address including domain (example: 0000:00:02.0): " GPU_PCI
+read -r -p "Target Ubuntu VM ID (example: 102): " VM_ID
+lspci -nnk -s "$GPU_PCI"
+```
+
+On this host, the initial **Kernel driver in use** was `i915`. That is the host's Intel graphics driver before passthrough. If IOMMU is not enabled or no IOMMU groups exist, complete the host's VT-d/IOMMU setup before proceeding; see the [Proxmox PCI passthrough guide](https://pve.proxmox.com/wiki/PCI_Passthrough). This working host already had IOMMU enabled, so no bootloader changes were needed for the process recorded here.
+
+### 2. Check the GPU's IOMMU group
+
+An IOMMU group contains devices that must be considered together for safe device assignment. Find the selected GPU's group and list every device in it:
+
+```bash
+GPU_GROUP=$(readlink -f "/sys/bus/pci/devices/$GPU_PCI/iommu_group")
+if [ -d "$GPU_GROUP/devices" ]; then
+    printf 'GPU IOMMU group: %s\n' "${GPU_GROUP##*/}"
+    for d in "$GPU_GROUP"/devices/*; do
+        lspci -nn -s "${d##*/}"
+    done
+else
+    echo "No usable IOMMU group found; resolve host IOMMU setup before continuing."
+fi
+```
+
+Our GPU was alone in group `0`; the equivalent check on that host was:
+
+```bash
+for d in /sys/kernel/iommu_groups/0/devices/*; do
+    lspci -nn -s "${d##*/}"
+done
+```
+
+It listed only `00:02.0 VGA compatible controller: Intel UHD Graphics 630`. Group numbers and PCI addresses vary between systems. If your group contains additional devices, resolve their assignment requirements before using this single-device example; do not detach a group containing devices the host still needs.
+
+### 3. Verify the existing VM configuration
+
+In the **Proxmox host shell**, inspect your selected VM:
+
+```bash
+qm config "$VM_ID"
+```
+
+For VM `102`, the relevant settings were as follows (network details abbreviated):
+
+```text
+cores: 2
+cpu: host
+memory: 4096
+net0: virtio,bridge=vmbr0,tag=30
+ostype: l26
+```
+
+VLAN `30` was used on this particular server; the earlier guide uses example VLAN `50`. GPU passthrough does not require changing either network configuration. Confirm the VM uses CPU type **host**; if it does not, set that type while the VM is stopped in the next step.
+
+Inside the **Ubuntu VM**, check how the installed system boots:
+
+```bash
+if [ -d /sys/firmware/efi ]; then
+    echo "UEFI boot"
+else
+    echo "Legacy BIOS boot"
+fi
+```
+
+This VM returned `Legacy BIOS boot`. It retained SeaBIOS and i440fx throughout the setup; a firmware conversion was not part of the solution.
+
+### 4. Pass through the Intel GPU
+
+Back up the VM first. Full PCI passthrough assigns the GPU to the VM, so the Proxmox host must not depend on it for its display or other GPU workloads. Keep access to the host through its web interface or SSH.
+
+Return to the **Proxmox host shell** and shut down the selected VM:
+
+```bash
+qm shutdown "$VM_ID"
+qm status "$VM_ID"
+```
+
+Wait until the status is **stopped**. If necessary, repeat `qm status "$VM_ID"`; do not attach the device while the VM is still shutting down. If its CPU type was not already `host`, set it now with `qm set "$VM_ID" -cpu host`.
+
+Check the earlier `qm config` output for an existing `hostpci0` entry before assigning the GPU. The example used an unused `hostpci0` slot; use an unused `hostpciN` slot if your VM already has passthrough devices.
+
+```bash
+qm set "$VM_ID" -hostpci0 "$GPU_PCI"
+qm start "$VM_ID"
+```
+
+With the example values, the attachment command was `qm set 102 -hostpci0 0000:00:02.0`. We did not add `x-vga`, change the BIOS or machine type, or remove the virtual display. Proxmox printed the informational message `OpRegion detected on Intel display 3e92`, and the VM started normally. That message alone is not an error or proof of working transcoding; continue with the guest and container checks.
+
+### 5. Verify GPU detection inside Ubuntu
+
+In the **Ubuntu VM**, run:
+
+```bash
+lspci -nn | grep -Ei 'VGA|Display'
+ls -l /dev/dri
+```
+
+Ubuntu detected the Intel UHD 630 and exposed these devices:
+
+```text
+/dev/dri/card0
+/dev/dri/card1
+/dev/dri/renderD128
+```
+
+The render device is the interface Polyfin uses for VAAPI. Device numbering can differ; if multiple render devices exist, identify the Intel one before configuring Polyfin. For example, `readlink -f /sys/class/drm/renderD128/device` shows the guest PCI device associated with that render node, which you can compare with the guest's `lspci` output. The guest PCI address need not match the host address. If no render device appears, resolve guest GPU detection before proceeding to Docker.
+
+### 6. Expose the GPU to the Polyfin container
+
+Run the remaining shell commands in the **Ubuntu VM**, from the repository root used in step 9 (the directory containing `.env` and `docker/`). The working server originally used `compose.embedded.yaml` plus a `compose.network.yaml` override. This repository already keeps the needed configuration in **`docker/polyfin/compose.yaml`**, so no second Compose file is needed.
+
+Open that file and uncomment its optional `devices` lines under `services.polyfin`. Leave the `group_add` lines commented until step 7. The relevant portion should now read:
+
+```yaml
+services:
+  polyfin:
+    network_mode: bridge
+    devices:
+      - /dev/dri:/dev/dri
+```
+
+Keep the rest of the service configuration. In particular, preserve **`network_mode: bridge`**, which resolved the Docker DNS and torrent peer discovery problem. The GPU mapping exposes the Ubuntu VM's device directory to the container; it does not grant the container's user permission to access every device by itself. See Docker's [device mapping documentation](https://docs.docker.com/reference/compose-file/services/#devices).
+
+Validate the configuration, recreate the container, and check the devices inside it:
+
+```bash
+sudo docker compose --env-file .env -f docker/polyfin/compose.yaml config --quiet
+sudo docker compose --env-file .env -f docker/polyfin/compose.yaml up -d --force-recreate
+sudo docker compose --env-file .env -f docker/polyfin/compose.yaml exec polyfin ls -l /dev/dri
+```
+
+The render device should appear inside the container. The template leaves GPU settings commented out by default so the earlier installation also works on hosts without `/dev/dri`.
+
+### 7. Give the container access to the render device
+
+Initially, Polyfin could see the GPU but could not use hardware acceleration. Inspect the container user and numeric device ownership:
+
+```bash
+sudo docker compose --env-file .env -f docker/polyfin/compose.yaml exec polyfin \
+  sh -c 'id; ls -ln /dev/dri/renderD128'
+stat -c 'Render device GID: %g; permissions: %a' /dev/dri/renderD128
+```
+
+On the working server, the container user had UID/GID `65532`, while the render device belonged to group `993` with permissions `660` (read/write for its owner and group). Device visibility was therefore insufficient: the container user needed membership in the device's group.
+
+**Determine the GID inside your Ubuntu VM, not on Proxmox, and do not blindly copy `993`.** Substitute your render path if different. Print the line to put in the repository's existing `.env`:
+
+```bash
+printf 'POLYFIN_RENDER_GID=%s\n' "$(stat -c '%g' /dev/dri/renderD128)"
+nano .env
+```
+
+Add or update `POLYFIN_RENDER_GID` with that numeric value, keeping the existing secret key and other variables. Then uncomment `group_add` in `docker/polyfin/compose.yaml`. Its GPU settings should be:
+
+```yaml
+services:
+  polyfin:
+    network_mode: bridge
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${POLYFIN_RENDER_GID:?Set POLYFIN_RENDER_GID to the render device GID in .env}"
+```
+
+Docker's [`group_add`](https://docs.docker.com/reference/compose-file/services/#group_add) supplies supplementary group membership to the container user. The variable makes this portable across hosts, and the required-value expression catches an unset or empty GID. There is no need to make the container privileged, run it as root, or make the GPU device world-writable.
+
+Recreate the container to apply the new group, then verify its membership and read/write access:
+
+```bash
+sudo docker compose --env-file .env -f docker/polyfin/compose.yaml config --quiet
+sudo docker compose --env-file .env -f docker/polyfin/compose.yaml up -d --force-recreate
+sudo docker compose --env-file .env -f docker/polyfin/compose.yaml exec polyfin \
+  sh -c 'id; ls -ln /dev/dri/renderD128; if [ -r /dev/dri/renderD128 ] && [ -w /dev/dri/renderD128 ]; then echo "Render device is readable and writable"; else echo "Render device access is still blocked"; exit 1; fi'
+```
+
+The `id` output should include your render GID, and the access check should succeed. Recheck the device GID if permissions change after a guest update or moving the deployment to another host.
+
+### 8. Enable VAAPI in Polyfin
+
+In **Polyfin Admin > Settings > Conversion (transcoding)**, set:
+
+| Setting | Value |
+| --- | --- |
+| Conversion (transcoding) | Enabled |
+| Graphics card used to convert | **AMD or Intel (VAAPI)** |
+| Graphics card for VAAPI | `/dev/dri/renderD128`, or your verified Intel render device |
+
+Save the settings. Under **Detected on this server**, this system successfully reported:
+
+- GPU: **AMD or Intel (VAAPI)**
+- Device: `/dev/dri/renderD128`
+- Hardware encoders: `h264_vaapi`, `hevc_vaapi`
+- HDR-to-SDR conversion on GPU: **Supported**
+
+These are the capabilities detected on this UHD 630 deployment; use your own detection results rather than assuming every Intel GPU has identical codec and HDR support. See Polyfin's [GPU and HDR documentation](https://github.com/moodiness/polyfin/blob/main/docs/gpus-and-hdr.md) for its acceleration settings.
+
+### 9. Verify an actual hardware transcode
+
+A remux changes the media container without re-encoding the video. Our first 4K test showed **one remux and zero video conversions**, so it did not exercise hardware video encoding. To request a conversion:
+
+1. Play a 4K source in the Jellyfin/Polyfin web player whose bitrate exceeds the target below.
+2. Change playback quality from **Original/Auto** to **8 Mbps**.
+3. Open **Polyfin > System > Health > Transcoder** while playback is running.
+4. Confirm active video conversions increase. If the source can still play without conversion, use a higher-bitrate source that requires the quality reduction.
+
+Our system reported **GPU: VAAPI**, encoders **`h264_vaapi` / `hevc_vaapi`**, **2 active video conversions**, and a **GPU HDR-to-SDR benchmark of 3.8x real-time**. Those are observed results, not required counts or a performance guarantee.
+
+Active conversions together with detected GPU support are strong indicators, but they do not prove that a particular playback session uses VAAPI. Inspect the FFmpeg process for that conversion while it is active. From the repository root in the **Ubuntu VM**, list the container's FFmpeg command lines:
+
+```bash
+POLYFIN_CONTAINER=$(sudo docker compose --env-file .env -f docker/polyfin/compose.yaml ps -q polyfin)
+sudo docker top "$POLYFIN_CONTAINER" -eo pid,args | grep '[f]fmpeg'
+```
+
+Match the running job to the test playback (pause other sessions if necessary). Its selected video encoder should be **`h264_vaapi` or `hevc_vaapi`**, typically following `-c:v`, `-codec:v`, or `-vcodec`. A running conversion using that encoder, with no fallback errors, verifies VAAPI video encoding for that job. `libx264` or `libx265` indicates software video encoding; a video codec of `copy` indicates no video re-encode. A list of available encoders or a `vaapi` device argument alone does not establish which encoder the job actually uses.
+
+If the process has already completed or is running only in bursts, inspect again while conversion is active. Check recent errors alongside it with:
+
+```bash
+sudo docker compose --env-file .env -f docker/polyfin/compose.yaml logs --since=5m polyfin \
+  | grep -iE 'ffmpeg|vaapi|transcod|permission|fallback'
+```
+
+After testing, restore playback quality to **Original/Auto**. Hardware acceleration remains available when a later playback session needs transcoding; direct play and remux do not need video re-encoding.
+
 ## 12. Configure Cloudflare DNS and the API token
 
 This step is for the optional Cloudflare-based HTTPS example. Polyfin itself does not need a Cloudflare account, API token, or public domain for local playback. If using another DNS provider or certificate method, adapt the DNS records and the proxy configuration in step 13 together; the supplied Caddy files specifically use the Cloudflare plugin and token.
