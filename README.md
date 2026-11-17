@@ -1,4 +1,4 @@
-# Polyfin Homelab
+# Polyfin Setup Guide
 
 This guide documents a working Polyfin homelab deployment for on-demand streaming to Jellyfin clients, using a dedicated Ubuntu VM on Proxmox. Adapt the example to your own equipment to browse movie and television catalogs and stream without maintaining a permanent downloaded library.
 
@@ -338,11 +338,13 @@ This uses Docker's built-in bridge rather than the user-defined network Compose 
 sudo docker compose --env-file .env -f docker/polyfin/compose.yaml exec polyfin cat /etc/resolv.conf
 ```
 
-Expect reachable non-loopback nameservers, such as the `1.1.1.1` and `1.0.0.1` supplied in this guide. Do not edit this Docker-managed file inside the container. When applying a networking change to an existing deployment, use `up -d --force-recreate` with the same Compose arguments to recreate the container and retain its data volume.
+For this torrent route, expect reachable non-loopback nameservers, such as the `1.1.1.1` and `1.0.0.1` supplied in this guide; these particular DNS servers are not required. Do not edit this Docker-managed file inside the container. When applying a networking change to an existing deployment, use `up -d --force-recreate` with the same Compose arguments to recreate the container and retain its data volume.
 
 The Polyfin template is adapted from the [official embedded-database Compose configuration](https://github.com/moodiness/polyfin/blob/main/compose.embedded.yaml). Discovery broadcasting is omitted; clients connect using the server address explicitly.
 
 ## 11. Configure catalogs, sources, and playback
+
+Use your own host address for the administration interface. The catalog and streaming providers below are the choices used in this example; select compatible sources for your deployment. Torrent settings apply when using torrent sources, rather than being a requirement for every playback source.
 
 ### Add catalogs and a streaming provider
 
@@ -368,6 +370,8 @@ Posters with no playable versions indicate a source or permission problem. Sourc
 Set a cache limit that leaves space for the operating system and database. For richer cast information and artwork, configure your own TMDB API key in **Settings > Content > Images**. Web-player themes affect the browser interface; native TV clients control their own layouts.
 
 ## 12. Configure Cloudflare DNS and the API token
+
+This step is for the optional Cloudflare-based HTTPS example. Polyfin itself does not need a Cloudflare account, API token, or public domain for local playback. If using another DNS provider or certificate method, adapt the DNS records and the proxy configuration in step 13 together; the supplied Caddy files specifically use the Cloudflare plugin and token.
 
 In the Cloudflare dashboard, select your zone, then **DNS > Records > Add record**:
 
@@ -410,6 +414,8 @@ The result should be your public WAN address. Wait for DNS propagation if it sti
 
 ## 13. Build Caddy and test HTTPS locally
 
+Follow this step if using the supplied Caddy/Cloudflare proxy. Caddy, DNS-01 validation, and port 8443 are choices for this homelab's HTTPS endpoint, not Polyfin dependencies. With an existing HTTPS proxy or another certificate setup, configure its equivalent upstream connection and trusted proxy handling. For local playback without this proxy, skip this step and use Polyfin's reachable local address.
+
 The included Dockerfile builds Caddy with the Cloudflare DNS plugin. Compose publishes TCP **8443** and passes `POLYFIN_DOMAIN` and `CLOUDFLARE_API_TOKEN`.
 
 The included Caddyfile reads the hostname and token from those variables:
@@ -450,7 +456,7 @@ curl -I --resolve tv.example.com:8443:192.168.50.10 \
 
 Expect `200 OK` without using `-k`. This checks TLS and proxy connectivity before WAN forwarding. For a 502, test `curl -I http://127.0.0.1:8096/web/` on the VM. For certificate errors, check the token, zone scope, and Caddy logs.
 
-In Polyfin, open **Settings > Notifications**, set **Public address** to `https://tv.example.com:8443`, and save. Leave Polyfin's own HTTPS server disabled; Caddy terminates TLS and forwards HTTP internally.
+For this proxy setup, open Polyfin **Settings > Notifications**, set **Public address** to `https://tv.example.com:8443`, and save. Leave Polyfin's own HTTPS server disabled here because Caddy terminates TLS and forwards HTTP internally. With another setup, use your actual client-facing address and configure TLS at the endpoint you chose.
 
 Configure client-IP handling before opening remote access:
 
@@ -462,6 +468,8 @@ Configure client-IP handling before opening remote access:
 This lets Polyfin use Caddy's forwarded client address. The [upstream reverse-proxy guide](https://github.com/moodiness/polyfin/blob/main/docs/reverse-proxy.md) explains the header handling.
 
 ## 14. Create the FortiGate VIP and remote access policy
+
+This optional step implements direct remote access with a FortiGate port forward and source-IP allowlist. On another router or firewall, use its equivalent destination NAT and access rules for your chosen HTTPS endpoint. FortiGate VIPs and public port forwarding are not required for local playback; skip this step if remote access is unnecessary or already provided through another suitable access path.
 
 ### Create the remote source address
 
@@ -512,11 +520,13 @@ From a device connected to the remote household's network, open:
 https://tv.example.com:8443/web/
 ```
 
-Confirm the login page loads with a trusted certificate, sign in as `viewer`, and play a title. If it times out, check **Log & Report > Forward Traffic** on the FortiGate for the source IP, destination port 8443, and matching policy. Confirm the VIP and policy are both enabled and the remote public IP matches `Remote-Household`.
+Confirm the login page loads with a trusted certificate, sign in as `viewer`, and play a title. If it times out in this example, check **Log & Report > Forward Traffic** on the FortiGate for the source IP, destination port 8443, and matching policy. Confirm the VIP and policy are both enabled and the remote public IP matches `Remote-Household`. On other equipment, check the corresponding forwarding rules, access controls, and logs.
 
-Test WAN access from the allowed remote network; LAN access through the public IP depends on hairpin NAT. Include `:8443` in the URL.
+Test WAN access from the allowed remote network; LAN access through the public IP depends on hairpin NAT. Include `:8443` in the URL when using this example's port mapping, or substitute your chosen HTTPS port.
 
 ## 15. Connect Jellyfin smart TV clients
+
+Roku and LG webOS are example clients, not required TV hardware. Use a compatible Jellyfin client or Polyfin's web player and enter the address reachable from that device. Substitute your host and, if configured, your remote HTTPS endpoint in the instructions below.
 
 1. Connect the TV to its home network using Ethernet or Wi-Fi.
 2. On Roku, open **Streaming Store / Streaming Channels**, search for **Jellyfin**, and install it. On LG webOS, find **Jellyfin** in the TV's app store and install it.
@@ -524,13 +534,15 @@ Test WAN access from the allowed remote network; LAN access through the public I
 4. Sign in with the `viewer` account created in step 11.
 5. Open a movie or television library, select a title and source, then play it. Try pausing, seeking, resuming, audio-track selection, and subtitles.
 
-Enter the server manually because discovery broadcasts do not normally cross VLANs.
+Enter the server manually for this example because discovery broadcasts do not normally cross VLANs. The client needs connectivity to Polyfin, regardless of the router, switch, hypervisor, or DNS provider used.
 
 ## 16. Backups, maintenance, and updates
 
+The retention schedule, SFTP destination, and VM backups below are example backup choices. Preserve Polyfin's data and encryption key using a backup method suitable for your host; an SFTP server or Proxmox VM backup is not a runtime dependency. Back up proxy state too if you deploy a proxy.
+
 In Polyfin **Settings > Backups**, enable **Back up the database every day**, choose a daily time, and retain seven backups to start. The default folder is `/data/backups` in the persistent volume. Under **System > Schedule**, use **Back up now** in the database backups panel and confirm it completes.
 
-For an off-VM copy, open **Settings > Backups > Destinations > Add a destination**. Select your existing SFTP backup server, enter its hostname, port, account credentials, and destination folder, then use **Test** and save. Run another backup and confirm the destination upload succeeds. Preserve `.env`, especially `POLYFIN_SECRET_KEY`, in your secure backup storage, and include Caddy's persistent volumes in VM backups. See the [Polyfin backup and restore guide](https://github.com/moodiness/polyfin/blob/main/docs/backups.md) for restore procedures.
+For an off-host copy using this example's SFTP approach, open **Settings > Backups > Destinations > Add a destination**. Select your existing SFTP backup server, enter its hostname, port, account credentials, and destination folder, then use **Test** and save. Run another backup and confirm the destination upload succeeds. Preserve `.env`, especially `POLYFIN_SECRET_KEY`, in your secure backup storage, and include Caddy's persistent volumes in host or VM backups if using Caddy. See the [Polyfin backup and restore guide](https://github.com/moodiness/polyfin/blob/main/docs/backups.md) for restore procedures.
 
 To update Polyfin:
 
@@ -539,7 +551,7 @@ sudo docker compose --env-file .env -f docker/polyfin/compose.yaml pull
 sudo docker compose --env-file .env -f docker/polyfin/compose.yaml up -d
 ```
 
-To rebuild Caddy and its DNS plugin:
+If using the supplied HTTPS setup, rebuild Caddy and its Cloudflare DNS plugin with:
 
 ```bash
 sudo docker compose --env-file .env -f docker/caddy/compose.yaml build --pull --no-cache
@@ -548,7 +560,7 @@ sudo docker compose --env-file .env -f docker/caddy/compose.yaml up -d
 
 Back up before updates, then check logs, HTTPS, and playback. The examples use moving image tags for convenience; pin tested image digests and plugin versions when you need repeatable upgrades. Avoid `docker compose down -v`, which deletes persistent volumes.
 
-Keep Ubuntu patched, monitor free disk space, and update the remote source-IP allowlist if the household's public IP changes. Docker-published ports need network-level filtering; do not rely on UFW alone to restrict them.
+Keep your host OS patched (Ubuntu in this example), monitor free disk space, and update the remote source-IP allowlist if you use one and the household's public IP changes. Docker-published ports need network-level filtering; do not rely on UFW alone to restrict them.
 
 ## Further reading
 
