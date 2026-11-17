@@ -1,10 +1,10 @@
 # Polyfin Homelab
 
-On-demand streaming for Jellyfin clients, hosted in a dedicated Ubuntu VM on Proxmox. Browse movie and television catalogs and stream without maintaining a permanent downloaded library.
+This guide documents a working Polyfin homelab deployment for on-demand streaming to Jellyfin clients, using a dedicated Ubuntu VM on Proxmox. Adapt the example to your own equipment to browse movie and television catalogs and stream without maintaining a permanent downloaded library.
 
 [Polyfin](https://github.com/moodiness/polyfin) handles accounts, buffering, transcoding, and the Jellyfin-compatible API. Cinemeta supplies catalogs and metadata; Stremio-compatible add-ons supply playable sources. TVs use Jellyfin clients; no separate Jellyfin server is required.
 
-Caddy provides HTTPS using Cloudflare DNS validation. A dedicated media VLAN and FortiGate policies separate the VM from other systems. Remote clients connect on TCP **8443**, leaving existing services on public ports 80 and 443 independent.
+In this homelab, Caddy provides HTTPS using Cloudflare DNS validation. A dedicated media VLAN and FortiGate policies separate the VM from other systems, with a Cisco switch carrying the VLAN. Remote clients connect on TCP **8443**, leaving existing services on public ports 80 and 443 independent. FortiGate, Cisco, Proxmox, and Cloudflare are choices for this deployment, not mandatory Polyfin dependencies. The diagram shows this example topology:
 
 ```mermaid
 flowchart LR
@@ -23,7 +23,11 @@ flowchart LR
 
 ## Before you begin
 
-You need a working Proxmox VE host, administrative access to a FortiGate and Cisco managed switch, an Ubuntu Server 24.04 ISO, and a Cloudflare-managed domain. The FortiGate must have an internet connection that accepts inbound connections for remote playback. Keep this VM separate from production applications.
+Polyfin needs a suitable host, persistent storage for its database and configuration, space for its streaming cache, network access to your chosen catalogs and sources, and a reachable address for clients. The supplied deployment uses Docker Engine and the Compose plugin, embedded PostgreSQL, and a persistent `POLYFIN_SECRET_KEY`. These software and storage needs are separate from the brand of router, switch, hypervisor, or DNS provider you use.
+
+To reproduce this homelab exactly, use a Proxmox VE host, administrative access to a FortiGate and Cisco managed switch, an Ubuntu Server 24.04 ISO, and a Cloudflare-managed domain. You can instead use another suitable Docker host, including a physical Linux machine or a VM on another hypervisor, and adapt the networking to your own router and switch. A dedicated VM and media VLAN are isolation choices; Polyfin does not require them.
+
+Steps 12–14 describe this example's optional remote HTTPS setup. Its direct port-forwarding approach needs an internet connection that accepts inbound connections; local playback does not. Cloudflare and Caddy support the supplied HTTPS configuration, but you can use another DNS provider and HTTPS setup with the corresponding configuration changes. Keep the example VM separate from production applications when following this layout.
 
 Replace these examples consistently with your own values. The public IPs are documentation-only addresses.
 
@@ -43,11 +47,13 @@ Replace these examples consistently with your own values. The public IPs are doc
 | Allowed remote household public IP | `198.51.100.25` |
 | Cloudflare zone / media hostname | `example.com` / `tv.example.com` |
 
-Identify the switch ports connected to the FortiGate and media Proxmox host. Preserve their existing native VLAN and PVIDs.
+If following the VLAN example, identify the switch ports connected to your router and media host (the FortiGate and Proxmox host here). Preserve their existing native VLAN and PVIDs.
 
-Follow the numbered steps in order. Network device instructions run in their web interfaces; shell commands run on the Ubuntu VM unless another location is named.
+Follow the applicable numbered steps in order. Adapt or skip the equipment-specific steps when your existing host or network already provides the needed connectivity. Network device instructions below use this homelab's web interfaces; shell commands run on its Ubuntu VM unless another location is named. On another host OS, use its equivalent installation and administration commands.
 
 ## 1. Create the FortiGate media VLAN and DHCP server
+
+This optional isolation example uses FortiGate for routing and DHCP. On other equipment, configure equivalent addressing and isolation if desired; an existing suitable subnet can be used without creating a media VLAN.
 
 On the FortiGate, open **Network > Interfaces > Create New > Interface**. Configure:
 
@@ -68,6 +74,8 @@ On the FortiGate, open **Network > Interfaces > Create New > Interface**. Config
 Save the interface. Substitute your trunk-facing interface for `internal` if needed. This interface provides the gateway and DHCP settings; firewall policies provide isolation. Select **LAN** to expose DHCP controls in the GUI.
 
 ## 2. Create firewall objects and allow outbound internet access
+
+These are FortiGate instructions for the example VLAN. With another router or firewall, adapt its rules to allow the host to reach DNS, catalogs, and media sources while preserving your intended isolation. The named objects and `ALL` service policy below are this homelab's configuration, not Polyfin prerequisites.
 
 ### Create address objects
 
@@ -104,6 +112,8 @@ Do not add a general media-to-internal allow rule. Unmatched inter-VLAN traffic 
 
 ## 3. Allow home clients and SSH administration
 
+For this routed VLAN layout, the FortiGate rules below allow clients to reach Polyfin and the administrator to reach SSH. Use equivalent controls on your network as needed. SSH is this guide's administration method, and port 8443 is for its optional HTTPS proxy; neither is required for local Polyfin playback.
+
 ### Create the application services
 
 Open **Policy & Objects > Services > Create New > Service**. Create:
@@ -133,6 +143,8 @@ These rules allow LAN playback and HTTPS testing, with SSH limited to the admini
 
 ## 4. Carry the VLAN through the Cisco switch
 
+This step applies when carrying the example VLAN through a managed switch. Cisco hardware is not required: use your switch's equivalent VLAN controls, or skip this step if you are not using tagged VLANs.
+
 On a Cisco SG300:
 
 1. Open **VLAN Management > Create VLAN**, add VLAN ID **50**, name it **Media**, and apply.
@@ -151,6 +163,8 @@ Keep the Proxmox-facing port's management VLAN untagged and VLAN 50 tagged. See 
 
 ## 5. Enable VLAN awareness on the Proxmox bridge
 
+This step is specific to the Proxmox VLAN example. Use the equivalent virtual networking settings on another hypervisor, or skip it for a physical host or a deployment without tagged VM traffic.
+
 In Proxmox, select the **node**, then **System > Network > vmbr0 > Edit**:
 
 1. Enable **VLAN aware**.
@@ -162,6 +176,8 @@ In Proxmox, select the **node**, then **System > Network > vmbr0 > Edit**:
 The bridge now carries tagged VM traffic alongside host management traffic, as described in the [Proxmox network documentation](https://github.com/proxmox/pve-docs/blob/master/pve-network.adoc).
 
 ## 6. Create the Ubuntu VM and assign its VLAN
+
+The following creates this homelab's Docker host. Proxmox and an Ubuntu VM are optional deployment choices. If you already have a suitable host, use it and adapt the later commands and addresses. The CPU, memory, and disk values below are starting allocations for this example, not Polyfin minimum requirements; size your host for its workload.
 
 If reusing a dedicated Ubuntu VM, take a snapshot first and update its network device using the settings below. Otherwise, upload the Ubuntu Server 24.04 ISO to Proxmox storage under **ISO Images > Upload**, then click **Create VM**:
 
@@ -186,15 +202,19 @@ Start the VM and open its **Console**. In the Ubuntu installer:
 3. Set hostname `polyfin`, create user `mediaadmin`, and choose a strong password.
 4. Select **Install OpenSSH server**, complete the installation, and reboot from the virtual disk.
 
-Do not create an `ens18.50` VLAN inside Ubuntu; Proxmox already applies the tag. Add CPU or storage later if your transcoding and cache requirements need it.
+In this configuration, do not create an `ens18.50` VLAN inside Ubuntu; Proxmox already applies the tag. On other hosts, apply tagging only where your network design needs it. Add CPU or storage later if your transcoding and cache requirements need it.
 
 ### Reserve the VM's DHCP address
+
+Use your DHCP server's reservation feature or another suitable stable addressing method. The following reservation procedure uses Proxmox and FortiGate; DHCP reservations from these products are not a Polyfin requirement.
 
 Copy the VM's MAC address from **Proxmox > VM > Hardware > Network Device**. In **FortiGate > Network > Interfaces > media > Edit**, expand the DHCP settings and add an **IP address assignment rule / reservation** mapping that MAC to `192.168.50.10`. Save the reservation after checking that `.10` is unused. Keep the dynamic pool at `.100-.199`; [FortiGate supports reservations outside that pool within the same subnet](https://community.fortinet.com/fortigate-3/technical-tip-dhcp-reservation-outside-the-dhcp-range-but-within-the-subnet-212937).
 
 Reboot the Ubuntu VM from its console to obtain the reserved address. For a reused VM with a static address, edit its existing `/etc/netplan/*.yaml` configuration so the actual interface uses `dhcp4: true`, removing the old static address and default route. Apply with `sudo netplan try` from the Proxmox console. Do not create a second conflicting interface definition.
 
 ## 7. Verify networking before installing services
+
+Verify your host's address, routing, DNS, and outbound access regardless of equipment. The commands below target this Ubuntu VM; `qemu-guest-agent` is for integration with the example hypervisor and can be omitted on hosts that do not use it. The Cloudflare URL is only an HTTPS connectivity test, not a requirement to use Cloudflare services.
 
 In the Ubuntu console, run:
 
@@ -216,11 +236,11 @@ From your administration workstation, connect:
 ssh mediaadmin@192.168.50.10
 ```
 
-Continue over SSH once connected. For failures, check VLAN tags for DHCP, `Media-to-Internet` and NAT for internet access, or `Admin-to-Polyfin` for SSH. Ports 8096 and 8443 remain closed until their services start.
+Continue over SSH once connected. For failures in this example, check VLAN tags for DHCP, `Media-to-Internet` and NAT for internet access, or `Admin-to-Polyfin` for SSH; on other networks, check the equivalent routing and access controls. Ports 8096 and 8443 remain closed until their services start.
 
 ## 8. Install Docker
 
-On a fresh Ubuntu VM, install Docker Engine and the Compose plugin using the [official Docker repository](https://docs.docker.com/engine/install/ubuntu/):
+Docker Engine and the Compose plugin are needed to run the supplied Compose files. The commands below use the [official Docker repository](https://docs.docker.com/engine/install/ubuntu/) on a fresh Ubuntu host, whether physical or virtual. Use the appropriate Docker installation instructions for a different host OS:
 
 ```bash
 sudo apt update
@@ -250,6 +270,8 @@ Confirm the test container succeeds and Compose reports its version. For an exis
 
 ## 9. Copy the repository and prepare secrets
 
+Copy the files to your chosen Docker host; the VM, username, and paths below are examples. `POLYFIN_SECRET_KEY` belongs to Polyfin's configuration. `CLOUDFLARE_API_TOKEN` is only needed by the optional Caddy/Cloudflare setup, not by Polyfin itself.
+
 From a workstation with this repository downloaded, open a terminal in the directory containing `polyfin-homelab` and copy it to the VM:
 
 ```bash
@@ -266,11 +288,13 @@ openssl rand -hex 32
 nano .env
 ```
 
-Paste the generated value after `POLYFIN_SECRET_KEY=`. Save in nano with **Ctrl+O**, **Enter**, then exit with **Ctrl+X**. Leave the Cloudflare token blank until step 12. Keep the encryption key for the lifetime of the deployment and with your backups; never commit `.env`.
+Paste the generated value after `POLYFIN_SECRET_KEY=`. Save in nano with **Ctrl+O**, **Enter**, then exit with **Ctrl+X**. Leave the Cloudflare token blank unless following step 12. Keep the encryption key for the lifetime of the deployment and with your backups; never commit `.env`.
 
 Run remaining shell commands from **`~/polyfin-homelab`**. Compose reads secrets from the root `.env`; build and volume paths resolve relative to each Compose file.
 
 ## 10. Start Polyfin and create the administrator
+
+This step runs Polyfin independently of the example's router, switch, hypervisor, and optional HTTPS proxy. Substitute your host's address in the browser URLs. The supplied Compose file publishes port 8096; keep any changes to that mapping consistent with your client and proxy settings.
 
 Check that port 8096 is free:
 
