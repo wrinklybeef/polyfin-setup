@@ -1,0 +1,21 @@
+name: polyfin-caddy
+
+services:
+  caddy:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      POLYFIN_DOMAIN: ${POLYFIN_DOMAIN:?Set POLYFIN_DOMAIN in .env}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:?Set CLOUDFLARE_API_TOKEN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

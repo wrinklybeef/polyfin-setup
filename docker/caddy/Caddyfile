@@ -1,0 +1,12 @@
+{
+	auto_https disable_redirects
+}
+
+{$POLYFIN_DOMAIN}:8443 {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+		resolvers 1.1.1.1
+	}
+
+	reverse_proxy host.docker.internal:8096
+}
